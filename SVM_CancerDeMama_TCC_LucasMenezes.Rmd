@@ -1,0 +1,1031 @@
+---
+title: "Aplicação de Máquina de Vetores de Suporte na Detecção de Câncer de Mama"
+subtitle: "Uma Abordagem Integrada de Modelagem Matemática e Implementação Computacional"
+author: "Lucas Menezes e Silva"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Configuração Inicial
+
+```{r carregar-pacotes}
+
+load_or_install <- function(packages) {
+  for (package_name in packages) {
+    if (!requireNamespace(package_name, quietly = TRUE)) {
+      install.packages(package_name)
+    }
+    suppressPackageStartupMessages(library(package_name, character.only = TRUE))
+  }
+}
+
+required_packages <- c(
+  "mlbench", "e1071", "caret", "dplyr", "ggplot2", "reshape2", "pROC", "gridExtra", "scales"
+)
+
+load_or_install(required_packages)
+```
+
+## Carregamento e Preparação dos Dados
+
+```{r carregar-dados}
+data("BreastCancer")
+bc <- BreastCancer[, -1]
+bc[bc == "?"] <- NA
+bc <- na.omit(bc)
+bc[, -10] <- lapply(bc[, -10], function(x) as.numeric(as.character(x)))
+bc$Class <- as.factor(bc$Class)
+```
+
+## Divisão de Dados - Treino e Teste
+
+```{r dividir-visualizar}
+set.seed(64324)
+trainIndex <- createDataPartition(bc$Class, p = 0.35, list = FALSE)
+trainData <- bc[trainIndex, ]
+testData  <- bc[-trainIndex, ]
+
+trainData$Classe <- "Treino"
+testData$Classe  <- "Teste"
+combinedData <- bind_rows(trainData, testData)
+
+trainData <- trainData[,-11]
+testData <- testData[,-11]
+
+```
+
+
+
+## Busca dos melhores modelos ( Linear - padrão vs Modelo não linear)
+
+```{r}
+# Achando o melhor modelo ------------------------------------------------------
+
+buscar_melhor_modelo_fp <- function(gammas, costs,
+                                    kernel = "poly",#melhor performance 
+                                    train_data, test_data) {
+  # Pacotes
+  if (!requireNamespace("e1071", quietly = TRUE)) install.packages("e1071")
+  if (!requireNamespace("caret", quietly = TRUE)) install.packages("caret")
+  library(e1071)
+  library(caret)
+  
+  # Resultado inicial
+  resultados <- data.frame(
+    Gamma = numeric(),
+    Cost = numeric(),
+    Falsos_Positivos = numeric(),
+    Accuracy = numeric(),
+    Recall = numeric(),
+    Specificity = numeric(),
+    Balanced_Accuracy = numeric(),
+    Kappa = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Loop sobre gama e custo
+  for (g in gammas) {
+    for (c in costs) {
+      
+      # Treinar modelo
+      modelo <- svm(Class ~ ., data = train_data, kernel = kernel,
+                    gamma = g, cost = c, cross=10, probability = TRUE)
+      
+      # Prever
+      predicoes <- predict(modelo, test_data)
+      
+      # Matriz de confusão
+      conf_mat <- confusionMatrix(predicoes, test_data$Class)
+      
+      # Falsos Positivos Médicos
+      # (Previu maligno e era benigno)
+      tabela <- conf_mat$table
+      falsos_positivos <- tabela["malignant","benign"]
+      
+      # Métricas extras
+      acc <- conf_mat$overall["Accuracy"]
+      recall <- conf_mat$byClass["Sensitivity"]
+      specificity <- conf_mat$byClass["Specificity"]
+      balanced_acc <- (recall + specificity) / 2
+      kappa <- conf_mat$overall["Kappa"]
+      
+      # Salvar resultados
+      resultados <- rbind(resultados, data.frame(
+        Gamma = g,
+        Cost = c,
+        Falsos_Positivos = falsos_positivos,
+        Accuracy = acc,
+        Recall = recall,
+        Specificity = specificity,
+        Balanced_Accuracy = balanced_acc,
+        Kappa = kappa
+      ))
+    }
+  }
+  
+  # Encontrar o melhor (menor falsos positivos)
+  melhor_idx <- which.min(resultados$Falsos_Positivos)
+  melhor_modelo <- resultados[melhor_idx, ]
+  
+  # Reajustar o modelo com os melhores parâmetros
+  melhor_fit <- svm(Class ~ ., data = train_data,
+                    kernel = kernel,
+                    gamma = melhor_modelo$Gamma,
+                    cost = melhor_modelo$Cost,
+                    cross = 10,
+                    probability = TRUE)
+  
+  # Retornar
+  return(list(
+    Resultados_Grade = resultados,
+    Melhor_Modelo = melhor_modelo,
+    Modelo_Fit = melhor_fit
+  ))
+}
+
+
+# Definindo a faixa de valores
+gammas <- seq(0.1, 2, by = 0.1)
+costs <- seq(1, 6, by = 1)
+
+# Executando a busca
+resultado_busca <- buscar_melhor_modelo_fp(
+  gammas = gammas,
+  costs = costs,
+  kernel = "polynomial", # tem que alterar para cada kernel => radial ou linear ou sigmoid
+  train_data = trainData,
+  test_data = testData
+)
+
+# Visualizar a tabela completa
+#resultado_busca$Resultados_Grade
+
+# Visualizar o melhor modelo encontrado
+resultado_busca$Melhor_Modelo
+
+# Acessar o modelo treinado final
+resultado_busca$Modelo_Fit
+
+# Falsos positivos
+resultado_busca$Melhor_Modelo$Falsos_Positivos
+
+
+# LINEAR 8
+# poly 11
+# POLYNOMIAL 1 -> VENCEDOR!!!!
+# SIGMOID 8
+
+# VISUALIZANDO GRÁFICAMENTE_____________________________________________________
+
+# Gerar Heatmap dos Falsos Positivos
+plot_fp_heatmap <- function(resultados_grade) {
+  if (!requireNamespace("ggplot2", quietly = TRUE)) install.packages("ggplot2")
+  library(ggplot2)
+  
+  ggplot(resultados_grade, aes(x = as.factor(Cost),
+                               y = as.factor(Gamma), fill = Falsos_Positivos)) +
+    geom_tile(color = "white") +
+    geom_text(aes(label = Falsos_Positivos), color = "white", size = 4) +
+    scale_fill_gradient(low = "blue", high = "red") +
+    labs(title = "",
+         x = "Cost",
+         y = "Gamma",
+         fill = "Falsos Positivos") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+
+# Só rodar:
+
+plot_fp_heatmap(resultado_busca$Resultados_Grade)
+```
+
+## Criação dos Modelos Linear e Polinomial
+
+```{r}
+# Modelos SVM ------------------------------------------------------------------
+# MODELO poly ------------------------------------------------------------------
+
+
+# SVM poly com parâmetros ajustados + cross-validation
+fit.poly <- svm(Class ~ ., data = trainData,
+                kernel = "polynomial",
+                gamma = 0.1,
+                cost = 1,
+                cross=10,
+                probability = TRUE)
+
+summary(fit.poly)
+
+# Previsão com modelo ajustado
+pred_final_poly <- predict(fit.poly, testData, probability = TRUE)
+conf_matrix <- confusionMatrix(pred_final_poly, testData$Class)
+print(conf_matrix)
+
+
+
+
+
+# MODELO LINEAR-----------------------------------------------------------------
+
+# Ajustar o modelo Linear também com cross-validation
+fit.linear <- svm(Class ~ ., data = trainData,
+                  kernel = "linear",
+                  gamma = 0.1,
+                  cost = 1,  # Podemos começar com cost padrão = 1
+                  cross = 10,
+                  probability = TRUE)
+
+# Predição com modelo Linear ajustado
+pred_final_linear <- predict(fit.linear, testData, probability = TRUE)
+
+# Matriz de confusão
+conf_matrix_linear <- confusionMatrix(pred_final_linear, testData$Class)
+print(conf_matrix_linear)
+
+
+```
+
+
+
+```{r}
+
+# Comparação SVM poly vs SVM Linear - MODELOS AJUSTADOS-----------------------
+
+# Avaliação polynomial
+conf_poly <- confusionMatrix(pred_final_poly,
+                               testData$Class)  # usando pred_final do fit.poly
+probs_poly <- attr(predict(fit.poly, testData,
+                             probability = TRUE), "probabilities")[, "malignant"]
+roc_poly <- roc(testData$Class, probs_poly,
+                  levels = c("benign", "malignant"), direction = "<")
+auc_poly <- auc(roc_poly)
+
+# Avaliação Linear
+conf_linear <- confusionMatrix(pred_final_linear,
+                               testData$Class)  # usando pred_final_linear do fit.linear
+probs_linear <- attr(predict(fit.linear, testData,
+                             probability = TRUE), "probabilities")[, "malignant"]
+roc_linear <- roc(testData$Class, probs_linear,
+                  levels = c("benign", "malignant"), direction = "<")
+auc_linear <- auc(roc_linear)
+
+# Função para calcular Precision e F1-Score
+calc_metrics <- function(conf_mat) {
+  precision <- conf_mat$byClass["Pos Pred Value"]  # Precision
+  recall <- conf_mat$byClass["Sensitivity"]        # Recall
+  specificity <- conf_mat$byClass["Specificity"]   # Specificity
+  f1 <- 2 * ((precision * recall) / (precision + recall)) # F1 Score
+  balanced_acc <- (recall + specificity) / 2              # Balanced Accuracy
+  kappa <- conf_mat$overall["Kappa"]                      # Kappa
+  
+  return(c(precision, recall, specificity, f1, balanced_acc, kappa))
+}
+
+# Aplicar função
+metrics_poly <- calc_metrics(conf_poly)
+metrics_linear <- calc_metrics(conf_linear)
+
+# Construir Tabela Final
+resultado_completo <- data.frame(
+  Modelo = c("SVM polynomial (ajustado)", "SVM Linear (ajustado)"),
+  Acuracia = c(conf_poly$overall["Accuracy"], conf_linear$overall["Accuracy"]),
+  Precision = c(metrics_poly[1], metrics_linear[1]),
+  Recall = c(metrics_poly[2], metrics_linear[2]),
+  Specificity = c(metrics_poly[3], metrics_linear[3]),
+  F1_Score = c(metrics_poly[4], metrics_linear[4]),
+  Balanced_Accuracy = c(metrics_poly[5], metrics_linear[5]),
+  Kappa = c(metrics_poly[6], metrics_linear[6]),
+  AUC = c(auc_poly, auc_linear)
+)
+
+# Visualizar
+print(resultado_completo)
+
+
+
+```
+
+## Visualização das curvas ROC e ECDF
+```{r}
+
+# Curva ROC LINEAR -------------------------------------------------------------
+
+
+# Calcular probabilidades previstas para o modelo Linear
+probs_linear <- attr(predict(fit.linear, testData, probability = TRUE),
+                     "probabilities")[, "malignant"]
+
+# Curva ROC para modelo Linear
+roc_curve_linear <- roc(testData$Class, probs_linear,
+                        levels = c("benign", "malignant"), direction = "<")
+
+# Plotar a Curva ROC
+plot(roc_curve_linear, col = "#1f78b4", main = "")
+
+# Calcular AUC
+auc_linear <- auc(roc_curve_linear)
+cat("AUC do Modelo Linear:", round(auc_linear, 3), "\n")
+
+
+# Transformar classes em binárias (1 = "malignant", 0 = "benign")
+y_true_linear <- ifelse(testData$Class == "malignant", 1, 0)
+
+# Obter probabilidades previstas para a classe "malignant" do modelo linear
+probs_linear <- attr(predict(fit.linear, testData, probability = TRUE),
+                     "probabilities")[, "malignant"]
+
+# Organizar em um data frame
+df_ks_linear <- data.frame(probs = probs_linear, actual = y_true_linear)
+
+# Separar as distribuições cumulativas
+ecdf_malignant_linear <- ecdf(df_ks_linear$probs[df_ks_linear$actual == 1])
+ecdf_benign_linear    <- ecdf(df_ks_linear$probs[df_ks_linear$actual == 0])
+
+# Sequência de pontos para comparar
+probs_seq_linear <- seq(0, 1, by = 0.001)
+
+# Calcular as distâncias absolutas
+diffs_linear <- abs(ecdf_malignant_linear(probs_seq_linear) - ecdf_benign_linear(probs_seq_linear))
+ks_statistic_linear <- max(diffs_linear)
+
+# Resultado da Estatística KS
+cat("Estatística KS do Modelo Linear:", round(ks_statistic_linear, 3), "\n")
+
+# Criar dataframe de ECDFs
+df_ecdf_linear <- data.frame(
+  Prob = probs_seq_linear,
+  Benign = ecdf_benign_linear(probs_seq_linear),
+  Malignant = ecdf_malignant_linear(probs_seq_linear)
+)
+
+# Adicionar coluna de diferença
+df_ecdf_linear <- df_ecdf_linear %>%
+  mutate(KS_Diff = abs(Malignant - Benign))
+
+# Encontrar o ponto de maior separação (KS)
+max_ks_linear <- df_ecdf_linear[which.max(df_ecdf_linear$KS_Diff), ]
+
+# Gráfico para o Modelo Linear
+ggplot(df_ecdf_linear, aes(x = Prob)) +
+  geom_line(aes(y = Benign, color = "Benign")) +
+  geom_line(aes(y = Malignant, color = "Malignant")) +
+  geom_segment(aes(x = max_ks_linear$Prob, xend = max_ks_linear$Prob,
+                   y = max_ks_linear$Benign, yend = max_ks_linear$Malignant),
+               color = "black", linetype = "dashed") +
+  annotate("text", x = max_ks_linear$Prob,
+           y = (max_ks_linear$Benign + max_ks_linear$Malignant)/2,
+           label = paste("KS =", round(ks_statistic_linear, 3)),
+           vjust = -1, hjust = -1.5) +
+  scale_color_manual(values = c("Benign" = "#1f78b4", "Malignant" = "#e31a1c")) +
+  labs(title = "Modelo Linear",
+       x = "Probabilidade prevista para 'maligno'",
+       y = "Distribuição acumulada",
+       color = "Classe") +
+  theme_minimal()
+
+
+
+
+# Curva ROC  poly --------------------------------------------------------------
+
+# Probabilidades para classe "malignant" - Usando fit.poly ajustado
+probs_poly <- attr(predict(fit.poly, testData,
+                           probability = TRUE), "probabilities")[, "malignant"]
+
+# Curva ROC para modelo poly ajustado
+roc_curve_poly <- roc(testData$Class, probs_poly,
+                      levels = c("benign", "malignant"), direction = "<")
+
+# Plotar a Curva ROC
+plot(roc_curve_poly, col = "#e31a1c",
+     main = "")
+
+# Calcular AUC
+auc_value_poly <- auc(roc_curve_poly)
+cat("AUC do Modelo Polinomial (ajustado):", round(auc_value_poly, 3), "\n")
+
+# Isso significa que, em X% das vezes, o modelo consegue ranquear 
+# um caso maligno acima de um benigno (em termos de probabilidade).
+
+
+# ANALISANDO A DIFERENCIAÇÃO DAS DISTRIBUIÇÕES POR CLASSE ---------------------
+
+# Transformar classes em binárias (1 = "malignant", 0 = "benign")
+y_true_poly <- ifelse(testData$Class == "malignant", 1, 0)
+
+# Organizar em um data frame
+df_ks_poly <- data.frame(probs = probs_poly, actual = y_true_poly)
+
+# Separar as distribuições cumulativas
+ecdf_malignant_poly <- ecdf(df_ks_poly$probs[df_ks_poly$actual == 1])
+ecdf_benign_poly    <- ecdf(df_ks_poly$probs[df_ks_poly$actual == 0])
+
+# Sequência de pontos para comparar
+probs_seq_poly <- seq(0, 1, by = 0.001)
+
+# Calcular as distâncias absolutas
+diffs_poly <- abs(ecdf_malignant_poly(probs_seq_poly) - ecdf_benign_poly(probs_seq_poly))
+ks_statistic_poly <- max(diffs_poly)
+
+# Resultado da Estatística KS
+cat("Estatística KS do Modelo Polinomial (ajustado):",
+    round(ks_statistic_poly, 3), "\n")
+
+# Criar dataframe para plotagem das ECDFs
+df_ecdf_poly <- data.frame(
+  Prob = probs_seq_poly,
+  Benign = ecdf_benign_poly(probs_seq_poly),
+  Malignant = ecdf_malignant_poly(probs_seq_poly)
+)
+
+df_ecdf_poly <- df_ecdf_poly %>%
+  mutate(KS_Diff = abs(Malignant - Benign))
+
+# Encontrar o ponto máximo de separação (KS)
+max_ks_poly <- df_ecdf_poly[which.max(df_ecdf_poly$KS_Diff), ]
+
+# Gráfico de KS - Modelo poly
+ggplot(df_ecdf_poly, aes(x = Prob)) +
+  geom_line(aes(y = Benign, color = "Benign")) +
+  geom_line(aes(y = Malignant, color = "Malignant")) +
+  geom_segment(aes(x = max_ks_poly$Prob, xend = max_ks_poly$Prob,
+                   y = max_ks_poly$Benign, yend = max_ks_poly$Malignant),
+               color = "black", linetype = "dashed") +
+  annotate("text", x = max_ks_poly$Prob,
+           y = (max_ks_poly$Benign + max_ks_poly$Malignant)/2,
+           label = paste("KS =", round(ks_statistic_poly, 3)),
+           vjust = -1, hjust = -1.5) +
+  scale_color_manual(values = c("Benign" = "#1f78b4", "Malignant" = "#e31a1c")) +
+  labs(title = "Modelo Polinomial",
+       x = "Probabilidade prevista para 'maligno'",
+       y = "Distribuição acumulada",
+       color = "Classe") +
+  theme_minimal()
+
+
+# COMPARAçÂO CURVA ROC E KS (LINEAR vc poly)----------------------------------
+
+# Comparação AUC
+cat("\nComparação de AUC:\n")
+cat(" - SVM poly:", round(auc_poly, 3), "\n")
+cat(" - SVM Linear:", round(auc_linear, 3), "\n")
+
+if (auc_poly > auc_linear) {
+  cat("Melhor AUC: SVM poly\n")
+} else if (auc_poly < auc_linear) {
+  cat("Melhor AUC: SVM Linear\n")
+} else {
+  cat("Empate em AUC\n")
+}
+
+# Comparação KS
+cat("\nComparação de Estatística KS:\n")
+cat(" - SVM poly:", round(ks_statistic_poly, 3), "\n")
+cat(" - SVM Linear:", round(ks_statistic_linear, 3), "\n")
+
+if (ks_statistic_poly > ks_statistic_linear) {
+  cat("Maior separação KS: SVM poly\n")
+} else if (ks_statistic_poly < ks_statistic_linear) {
+  cat("Maior separação KS: SVM Linear\n")
+} else {
+  cat("Empate na Estatística KS\n")
+}
+
+
+```
+
+## Identificando as Variáveis com maior importância dada a Curva ROC
+
+```{r}
+
+# IMPORTANCIA DAS VARIÁVEIS-----------------------------------------------------
+
+# Treinar usando caret - SVM Polynomial
+svm_caret_fit_poly <- train(Class ~ ., data = trainData[,-11],
+                            method = "svmPoly",
+                            trControl = trainControl(method = "cv", number = 10),
+                            tuneGrid = expand.grid(
+                              degree = 2,    # Grau do polinômio (ajuste conforme quiser)
+                              scale = 0.1,   # Fator de ajuste (análogo ao gamma no radial)
+                              C = 2          # Parâmetro de custo
+                            ))
+
+# Importância das variáveis
+varImpPlot <- varImp(svm_caret_fit_poly)
+print(varImpPlot)
+plot(varImpPlot)
+
+# Preparar o dataframe para ggplot
+imp_df <- varImpPlot$importance
+imp_df$Variable <- rownames(imp_df)
+
+# Gráfico de Importância
+ggplot(imp_df, aes(x = reorder(Variable, benign), y = benign)) +
+  geom_col(fill = "#1f78b4") +
+  coord_flip() +
+  geom_hline(yintercept = 60, linetype = "dashed", color = "darkgray") +
+  geom_hline(yintercept = 100, linetype = "dashed", color = "red") +
+  geom_text(aes(label = round(benign, 1)), hjust = -0.1, size = 3.5, color = "black") +
+  labs(title = "Importância das Variáveis - SVM Polinomial Ajustado",
+       x = "Variável", y = "Importância (%)") +
+  theme_minimal() +
+  theme(axis.text = element_text(size = 10),
+        plot.title = element_text(size = 14, face = "bold"))
+
+
+
+```
+
+
+## Visualizando as Fronteiras de Decisão - TOP4 variáveis dada a importância
+
+```{r}
+
+# Fronteiras de Decisão das top 4 variáveis ------------------------------------
+
+# Função para criar o gráfico de fronteira para um par de variáveis
+plot_single_decision_boundary <- function(model_fit, train_data, var1, var2) {
+  # Pacotes
+  if (!requireNamespace("ggplot2", quietly = TRUE)) install.packages("ggplot2")
+  library(ggplot2)
+  
+  # Calcular médias das variáveis
+  media_vars <- sapply(train_data, function(x) if(is.numeric(x)) mean(x, na.rm = TRUE) else NA)
+  
+  # Criar grid variando apenas var1 e var2
+  x_seq <- seq(min(train_data[[var1]]), max(train_data[[var1]]), length.out = 100)
+  y_seq <- seq(min(train_data[[var2]]), max(train_data[[var2]]), length.out = 100)
+  grid <- expand.grid(x_seq, y_seq)
+  colnames(grid) <- c(var1, var2)
+  
+  # Preencher as demais variáveis com a média
+  for (col in colnames(train_data)) {
+    if (!(col %in% c(var1, var2, "Class"))) {
+      grid[[col]] <- media_vars[col]
+    }
+  }
+  
+  # Previsão usando o modelo completo
+  grid$Class <- predict(model_fit, newdata = grid)
+  
+  # Criar o gráfico
+  p <- ggplot() +
+    geom_point(data = grid, aes_string(x = var1, y = var2, color = "Class"),
+               shape = 15, alpha = 0.3, size = 1) +
+    geom_point(data = train_data, aes_string(x = var1, y = var2, color = "Class"),
+               shape = 16, size = 1.8) +
+    scale_color_manual(values = c("benign" = "#1f78b4", "malignant" = "#e31a1c")) +
+    labs(title = paste("", var1, "vs", var2),
+         x = var1, y = var2) +
+    theme_minimal()
+  
+  return(p)
+}
+
+
+# Exemplo de chamada para uma dupla
+plot1 <- plot_single_decision_boundary(fit.poly, testData, "Cell.size", "Cell.shape")
+plot2 <- plot_single_decision_boundary(fit.poly, testData, "Cell.size", "Bare.nuclei")
+plot3 <- plot_single_decision_boundary(fit.poly, testData, "Cell.size", "Bl.cromatin")
+plot4 <- plot_single_decision_boundary(fit.poly, testData, "Cell.shape", "Bare.nuclei")
+plot5 <- plot_single_decision_boundary(fit.poly, testData, "Cell.shape", "Bl.cromatin")
+plot6 <- plot_single_decision_boundary(fit.poly, testData, "Bare.nuclei", "Bl.cromatin")
+
+library(gridExtra)
+
+grid.arrange(plot1, plot2, nrow = 1, ncol = 2)
+grid.arrange(plot3, plot4, nrow = 1, ncol = 2)
+grid.arrange(plot5, plot6, nrow = 1, ncol = 2)
+
+
+
+
+```
+
+
+## Análise e visualização dos dados por PCA
+
+```{r}
+# PCA e visualização ----------------------------------------------------------
+
+# PCA GERAL
+
+# Selecionar colunas numéricas
+numeric_features_total <- combinedData %>% select(-Class, -Classe)
+
+# PCA
+pca_total_result <- prcomp(numeric_features_total, scale. = TRUE)
+
+combinedData_PCA <- combinedData %>%
+  mutate(PC1 = pca_total_result$x[, 1],
+         PC2 = pca_total_result$x[, 2])
+
+summary(pca_total_result)
+
+ggplot(combinedData_PCA, aes(x = PC1, y = PC2, color = Class, shape = Classe)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "Distribuição dos Dados no Espaço PCA") +
+  theme_minimal() +
+  scale_color_manual(values = c("benign" = "#1f78b4", "malignant" = "#e31a1c")) +
+  scale_shape_manual(values = c(16, 17))
+
+
+
+# Criando o modelo - Divisão treino e teste
+set.seed(64324)
+trainIndex <- createDataPartition(bc$Class, p = 0.35, list = FALSE)
+trainData <- bc[trainIndex, ]
+testData  <- bc[-trainIndex, ]
+
+trainData$Classe <- "Treino"
+testData$Classe  <- "Teste"
+
+
+
+# Estrutura de treino:
+
+# Selecionar colunas numéricas
+numeric_features_train <- trainData %>% select(-Class, -Classe)
+
+# PCA
+pca_result_train <- prcomp(numeric_features_train, scale. = TRUE)
+
+trainData_PCA <- trainData %>%
+  mutate(PC1 = pca_result_train$x[, 1],
+         PC2 = pca_result_train$x[, 2])
+
+summary(pca_result_train)
+
+
+# Estrutura de teste:
+
+# Selecionar colunas numéricas
+numeric_features_test <- testData %>% select(-Class, -Classe)
+
+# PCA
+pca_result_test <- prcomp(numeric_features_test, scale. = TRUE)
+
+testData_PCA <- testData %>%
+  mutate(PC1 = pca_result_test$x[, 1],
+         PC2 = pca_result_test$x[, 2])
+
+summary(pca_result_test)
+
+
+
+# Gráfico PCA - teste 
+ggplot(trainData_PCA, aes(x = PC1, y = PC2, color = Class, shape = Classe)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "Distribuição dos Dados no Espaço PCA - treino") +
+  theme_minimal() +
+  scale_color_manual(values = c("benign" = "#1f78b4", "malignant" = "#e31a1c")) +
+  scale_shape_manual(values = c(16, 17))
+
+# teste
+ggplot(testData_PCA, aes(x = PC1, y = PC2, color = Class, shape = Classe)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "Distribuição dos Dados no Espaço PCA - teste") +
+  theme_minimal() +
+  scale_color_manual(values = c("benign" = "#1f78b4", "malignant" = "#e31a1c")) +
+  scale_shape_manual(values = c(16, 17))
+
+
+
+# SVM Linear usando PC1 e PC2 --------------------------------------------------
+
+fit.linear_pca <- svm(Class ~ PC1 + PC2,
+                      data = trainData_PCA,
+                      kernel = "linear",
+                      gamma= 0.1,
+                      cost = 1,        # cost pode ser ajustado conforme tuning
+                      probability = TRUE,
+                      cross = 10)
+
+
+# Criar grade de pontos para previsão
+  # Importante ressaltar -> criar a malha com todos os valores (treino e teste)
+# para ter o range certo
+
+x_range_pca <- seq(-4,
+                   8, length.out = 100)
+y_range_pca <- seq(-5,2.5, length.out = 100)
+grid_pca <- expand.grid(PC1 = x_range_pca, PC2 = y_range_pca)
+grid_pca$Class <- predict(fit.linear_pca, grid_pca)
+
+# # Após PCA
+train_pca_valores <- predict(fit.linear_pca, newdata = trainData_PCA[,c(12,13)])
+test_pca_valores <- predict(fit.linear_pca, newdata = testData_PCA[,c(12,13)])
+
+# Vamos comparar a média das projeções para o treino
+mean_train_PC1 <- mean(trainData_PCA[,c(12)])
+mean_test_PC1 <- mean(testData_PCA[,c(12)])
+
+mean_train_PC2 <- mean(trainData_PCA[,c(13)])
+mean_test_PC2 <- mean(testData_PCA[,c(13)])
+
+# Se a direção da média for oposta, invertemos o sinal
+if (mean_train_PC1 * mean_test_PC1 < 0) {
+  testData_PCA[,c(12)] <- -testData_PCA[,c(12)]
+}
+
+if (mean_train_PC2 * mean_test_PC2 < 0) {
+  testData_PCA[,c(13)] <- -testData_PCA[,c(13)]
+}
+
+# Necessário corrigir os eixos caso a 
+# Componente possua médias com sinais diferentes
+
+
+# Plotar fronteira de decisão para SVM Linear
+ggplot() +
+  geom_point(data = grid_pca, aes(x = PC1, y = PC2, color = Class),
+             alpha = 0.15, shape = 15, size = 1.5) +
+  geom_point(data = testData_PCA, aes(x = PC1, y = PC2,
+                                          color = Class, shape = Classe),
+             alpha = 0.8) +
+  labs(title = "Fronteira de decisão do modelo linear",
+       x = "Componente Principal 1 (PC1)",
+       y = "Componente Principal 2 (PC2)") +
+  theme_minimal() +
+  scale_color_manual(values = c("benign" = "#1f78b4", "malignant" = "#e31a1c")) +
+  scale_shape_manual(values = c(16, 17))
+
+pred_linear_pca <- predict(fit.linear_pca, testData_PCA[,c(12,13)], probability = TRUE)
+conf_linear_pca <- confusionMatrix(pred_linear_pca, testData_PCA$Class)
+print(conf_linear_pca)
+
+
+# Fronteira de Decisão poly (usando PCA) -------------------------------------
+
+# Treinar modelo ajustado usando PC1 e PC2
+fit.poly_pca <- svm(Class ~ PC1 + PC2,
+                    data = trainData_PCA,
+                    kernel = "polynomial",
+                    gamma = 0.1,    # se quiser manter o ajuste manual
+                    cost = 1,
+                    probability = TRUE,
+                    cross = 10)
+
+
+# Criar grade de pontos para previsão
+# Importante ressaltar -> criar a malha com todos os valores (treino e teste)
+# para ter o range certo
+
+x_range_pca <- seq(-4,
+                   8, length.out = 100)
+y_range_pca <- seq(-5,2.5, length.out = 100)
+grid_pca <- expand.grid(PC1 = x_range_pca, PC2 = y_range_pca)
+grid_pca$Class <- predict(fit.poly_pca, grid_pca)
+
+
+# Vamos comparar a média das projeções para o treino
+mean_train_PC1 <- mean(trainData_PCA[,c(12)])
+mean_test_PC1 <- mean(testData_PCA[,c(12)])
+
+mean_train_PC2 <- mean(trainData_PCA[,c(13)])
+mean_test_PC2 <- mean(testData_PCA[,c(13)])
+
+# Se a direção da média for oposta, invertemos o sinal
+if (mean_train_PC1 * mean_test_PC1 < 0) {
+  testData_PCA[,c(12)] <- -testData_PCA[,c(12)]
+}
+
+if (mean_train_PC2 * mean_test_PC2 < 0) {
+  testData_PCA[,c(13)] <- -testData_PCA[,c(13)]
+}
+
+# Necessário corrigir os eixos caso a 
+# Componente possua médias com sinais diferentes
+
+
+# Plotar fronteira de decisão para SVM Poly
+ggplot() +
+  geom_point(data = grid_pca, aes(x = PC1, y = PC2, color = Class),
+             alpha = 0.15, shape = 15, size = 1.5) +
+  geom_point(data = testData_PCA, aes(x = PC1, y = PC2,
+                                      color = Class, shape = Classe),
+             alpha = 0.8) +
+  labs(title = "Fronteira de decisão do modelo polinomial",
+       x = "Componente Principal 1 (PC1)",
+       y = "Componente Principal 2 (PC2)") +
+  theme_minimal() +
+  scale_color_manual(values = c("benign" = "#1f78b4", "malignant" = "#e31a1c")) +
+  scale_shape_manual(values = c(16, 17))
+
+pred_poli_pca <- predict(fit.poly_pca, testData_PCA[,c(12,13)], probability = TRUE)
+conf_poli_pca <- confusionMatrix(pred_poli_pca, testData_PCA$Class)
+print(conf_poli_pca)
+
+
+# Comparação das fronteiras visuais dos modelos --------------------------------
+
+
+# Previsão usando modelo ajustado linear
+grid_pca$Class_Linear <- predict(fit.linear_pca, newdata = grid_pca)
+
+# Previsão usando modelo ajustado poly
+grid_pca$Class_poly <- predict(fit.poly_pca, newdata = grid_pca)
+
+
+names(grid_pca)[5] <- "Classe"
+
+ggplot() +
+  # Fronteira SVM poly (como fundo)
+  geom_point(data = grid_pca, aes(x = PC1, y = PC2, color = Classe),
+             alpha = 0.15, shape = 15, size = 1) +
+  # Fronteira SVM Linear (como contorno)
+  geom_contour(data = grid_pca, aes(x = PC1, y = PC2,
+                                    z = as.numeric(Class_Linear == "malignant")),
+               color = "black", linetype = "dashed") +
+  # Pontos reais dos dados
+  geom_point(data = testData_PCA, aes(x = PC1, y = PC2,
+                                          color = Class, shape = Classe),
+             alpha = 0.9, size = 2) +
+  labs(title = "",x = "Componente Principal 1 (PC1)",
+       y = "Componente Principal 2 (PC2)") +
+  scale_color_manual(values = c("benign" = "#1f78b4", "malignant" = "#e31a1c")) +
+  scale_shape_manual(values = c(16, 17)) +
+  theme_minimal()
+
+names(grid_pca)[5] <- "Class_poly"
+
+# Comparação das medidas entre os modelos de PCA--------------------------------
+
+metrics_poli_pca <- calc_metrics(conf_poli_pca)
+metrics_linear_pca <- calc_metrics(conf_linear_pca)
+
+
+# Construir a Tabela
+resultado_completo_pca <- data.frame(
+  Modelo = c("SVM Polinomial Ajustado (PCA)", "SVM Linear Ajustado (PCA)"),
+  Acuracia = c(conf_poli_pca$overall["Accuracy"], conf_linear_pca$overall["Accuracy"]),
+  Precision = c(metrics_poli_pca[1], metrics_linear_pca[1]),
+  Recall = c(metrics_poli_pca[2], metrics_linear_pca[2]),
+  Specificity = c(metrics_poli_pca[3], metrics_linear_pca[3]),
+  F1_Score = c(metrics_poli_pca[4], metrics_linear_pca[4]),
+  Balanced_Accuracy = c(metrics_poli_pca[5], metrics_linear_pca[5]),
+  Kappa = c(metrics_poli_pca[6], metrics_linear_pca[6])
+)
+
+# Visualizar
+print(resultado_completo_pca)
+
+# Extração de Falsos Positivos
+fp_poli_pca <- conf_poli_pca$table["malignant","benign"]
+fp_linear_pca <- conf_linear_pca$table["malignant","benign"]
+
+# Criar dataframe
+df_fp_pca <- data.frame(
+  Modelo = c("SVM Polinomial Ajustado (PCA)", "SVM Linear Ajustado (PCA)"),
+  Falsos_Positivos = c(fp_poli_pca, fp_linear_pca)
+)
+
+# Proporções
+df_fp_pca$Proporcao <- df_fp_pca$Falsos_Positivos/sum(df_fp_pca$Falsos_Positivos)
+df_fp_pca$Label <- paste0(df_fp_pca$Falsos_Positivos, " (", 
+                          scales::percent(df_fp_pca$Proporcao, accuracy = 0.1), ")")
+
+
+# Teste de McNemar no espaço PCA
+tabela_mcnemar_pca <- table(pred_poli_pca, pred_linear_pca)
+mcnemar_test_pca <- mcnemar.test(tabela_mcnemar_pca)
+
+# Resultado
+cat("Teste de McNemar no PCA:\n")
+cat(" - Estatística de teste:", round(mcnemar_test_pca$statistic, 3), "\n")
+cat(" - p-valor:", mcnemar_test_pca$p.value, "\n\n")
+
+if (mcnemar_test_pca$p.value < 0.05) {
+  cat("Diferença estatisticamente significativa entre os modelos no PCA!\n")
+} else {
+  cat("Sem diferença estatisticamente significativa no PCA.\n")
+}
+
+
+# FUNÇÃO DE DECISÃO DO MELHOR MODELO -------------------------------------------
+
+comparar_modelos_fp_completo <- function(fit_poly, fit_linear, fit_poly_pca,
+                                         fit_linear_pca, true_labels,
+                                         true_labels_pca) {
+  # Carregar pacote necessário
+  if (!requireNamespace("caret", quietly = TRUE)) install.packages("caret")
+  library(caret)
+  
+  cat("\n============================\n")
+  cat("📊 Comparação MODELOS ORIGINAIS\n")
+  cat("============================\n")
+  
+  # Modelos Originais
+  pred_poly <- predict(fit_poly, newdata = testData, probability = TRUE)
+  pred_linear <- predict(fit_linear, newdata = testData, probability = TRUE)
+  
+  conf_poly <- confusionMatrix(pred_poly, true_labels)
+  conf_linear <- confusionMatrix(pred_linear, true_labels)
+  
+  fp_poly <- conf_poly$table["malignant","benign"]
+  fp_linear <- conf_linear$table["malignant","benign"]
+  
+  cat("🔍 Falsos Positivos (Modelos Originais):\n")
+  cat(" - SVM poly:", fp_poly, "\n")
+  cat(" - SVM Linear:", fp_linear, "\n\n")
+  
+  if (fp_poly < fp_linear) {
+    melhor_modelo_original <- "SVM poly"
+    cat("Melhor modelo (Original): SVM poly\n\n")
+  } else if (fp_poly > fp_linear) {
+    melhor_modelo_original <- "SVM Linear"
+    cat("Melhor modelo (Original): SVM Linear\n\n")
+  } else {
+    melhor_modelo_original <- "Empate"
+    cat("Empate no Modelo Original\n\n")
+  }
+  
+  tabela_mcnemar_original <- table(pred_poly, pred_linear)
+  mc_test_original <- mcnemar.test(tabela_mcnemar_original)
+  
+  cat("Teste de McNemar (Modelos Originais):\n")
+  cat(" - Estatística:", round(mc_test_original$statistic, 3), "\n")
+  cat(" - p-valor:", mc_test_original$p.value, "\n")
+  if (mc_test_original$p.value < 0.05) {
+    cat("Diferença significativa entre os modelos ao nível de 5% (Original)!\n\n")
+  } else {
+    cat("Sem diferença significativa ao nível de 5% (Original).\n\n")
+  }
+  
+  
+  cat("\n============================\n")
+  cat("Comparação MODELOS PCA\n")
+  cat("============================\n")
+  
+  # Modelos PCA
+  pred_poly_pca <- predict(fit_poly_pca, newdata = testData_PCA[,c(12,13)], probability = T)
+  pred_linear_pca <- predict(fit_linear_pca, newdata = testData_PCA[,c(12,13)], probability = T)
+  
+
+  
+  conf_poly_pca <- confusionMatrix(pred_poly_pca, true_labels_pca)
+  conf_linear_pca <- confusionMatrix(pred_linear_pca, true_labels_pca)
+  
+  fp_poly_pca <- conf_poly_pca$table["malignant","benign"]
+  fp_linear_pca <- conf_linear_pca$table["malignant","benign"]
+  
+  cat("-> Falsos Positivos (Modelos PCA):\n")
+  cat(" - SVM poly PCA:", fp_poly_pca, "\n")
+  cat(" - SVM Linear PCA:", fp_linear_pca, "\n\n")
+  
+  if (fp_poly_pca < fp_linear_pca) {
+    melhor_modelo_pca <- "SVM poly PCA"
+    cat("Melhor modelo (PCA): SVM poly PCA\n\n")
+  } else if (fp_poly_pca > fp_linear_pca) {
+    melhor_modelo_pca <- "SVM Linear PCA"
+    cat("Melhor modelo (PCA): SVM Linear PCA\n\n")
+  } else {
+    melhor_modelo_pca <- "Empate"
+    cat("Empate no Modelo PCA\n\n")
+  }
+  
+  tabela_mcnemar_pca <- table(pred_poly_pca, pred_linear_pca)
+  mc_test_pca <- mcnemar.test(tabela_mcnemar_pca)
+  
+  cat("-> Teste de McNemar (Modelos PCA):\n")
+  cat(" - Estatística:", round(mc_test_pca$statistic, 3), "\n")
+  cat(" - p-valor:", mc_test_pca$p.value, "\n")
+  if (mc_test_pca$p.value < 0.05) {
+    cat("Diferença significativa entre os modelos ao nível de 5% (PCA)!\n")
+  } else {
+    cat("Sem diferença significativa ao nível de 5% (PCA).\n")
+  }
+  
+  # Retorna uma lista para salvar se quiser
+  return(list(
+    Original = list(
+      Falsos_Positivos = c(poly = fp_poly, Linear = fp_linear),
+      Melhor_Modelo = melhor_modelo_original,
+      McNemar_Test = mc_test_original
+    ),
+    PCA = list(
+      Falsos_Positivos = c(poly_PCA = fp_poly_pca, Linear_PCA = fp_linear_pca),
+      Melhor_Modelo = melhor_modelo_pca,
+      McNemar_Test = mc_test_pca
+    )
+  ))
+}
+
+# Chamada da função
+resultado_comparacao_completo <- comparar_modelos_fp_completo(
+  fit_poly = fit.poly,
+  fit_linear = fit.linear,
+  fit_poly_pca = fit.poly_pca,
+  fit_linear_pca = fit.linear_pca,
+  true_labels = testData$Class,
+  true_labels_pca = testData_PCA$Class
+)
+
+
+
+```
+
