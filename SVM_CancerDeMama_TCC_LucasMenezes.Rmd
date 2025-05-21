@@ -36,8 +36,11 @@ data("BreastCancer")
 bc <- BreastCancer[, -1]
 bc[bc == "?"] <- NA
 bc <- na.omit(bc)
+table(BreastCancer$Class)
+table(bc$Class)
 bc[, -10] <- lapply(bc[, -10], function(x) as.numeric(as.character(x)))
 bc$Class <- as.factor(bc$Class)
+
 ```
 
 ## Divisão de Dados - Treino e Teste
@@ -93,6 +96,7 @@ buscar_melhor_modelo_fp <- function(gammas, costs,
       # Treinar modelo
       modelo <- svm(Class ~ ., data = train_data, kernel = kernel,
                     gamma = g, cost = c, cross=10, probability = TRUE)
+      
       
       # Prever
       predicoes <- predict(modelo, test_data)
@@ -504,18 +508,8 @@ if (ks_statistic_poly > ks_statistic_linear) {
 
 # IMPORTANCIA DAS VARIÁVEIS-----------------------------------------------------
 
-# Treinar usando caret - SVM Polynomial
-svm_caret_fit_poly <- train(Class ~ ., data = trainData[,-11],
-                            method = "svmPoly",
-                            trControl = trainControl(method = "cv", number = 10),
-                            tuneGrid = expand.grid(
-                              degree = 2,    # Grau do polinômio (ajuste conforme quiser)
-                              scale = 0.1,   # Fator de ajuste (análogo ao gamma no radial)
-                              C = 2          # Parâmetro de custo
-                            ))
-
 # Importância das variáveis
-varImpPlot <- varImp(svm_caret_fit_poly)
+varImpPlot <- varImp(fit.poly)
 print(varImpPlot)
 plot(varImpPlot)
 
